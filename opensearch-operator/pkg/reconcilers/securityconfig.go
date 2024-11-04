@@ -112,6 +112,14 @@ func (r *SecurityconfigReconciler) Reconcile() (ctrl.Result, error) {
 	if r.instance.Spec.Security.Config != nil && r.instance.Spec.Security.Config.SecurityconfigSecret.Name != "" {
 		// Use a user passed value of SecurityconfigSecret name
 		configSecretName = r.instance.Spec.Security.Config.SecurityconfigSecret.Name
+		if r.instance.Spec.Security.RandomAdminSecrets == true {
+			r.logger.Info(fmt.Sprintf("Creating  secret '%s' that contains the default securityconfig", configSecretName))
+			err := helpers.CreateRandomSecrets(r.client, r.instance)
+			if err != nil {
+				return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 10}, err
+			}
+		}
+
 		// Wait for secret to be available
 		configSecret, err := r.client.GetSecret(configSecretName, namespace)
 		if err != nil {
