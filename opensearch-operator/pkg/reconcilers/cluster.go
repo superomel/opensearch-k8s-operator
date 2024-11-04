@@ -59,6 +59,11 @@ func NewClusterReconciler(
 func (r *ClusterReconciler) Reconcile() (ctrl.Result, error) {
 	// lg := log.FromContext(r.ctx)
 	result := reconciler.CombinedResult{}
+	// Create random custom secrets
+	// err := helpers.CreateRandomSecrets(r.client, r.instance)
+	// if err != nil {
+	// 	return ctrl.Result{}, err
+	// }
 	username, password, err := helpers.UsernameAndPassword(r.client, r.instance)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -90,6 +95,18 @@ func (r *ClusterReconciler) Reconcile() (ctrl.Result, error) {
 	discoveryService := builders.NewDiscoveryServiceForCR(r.instance)
 	result.CombineErr(ctrl.SetControllerReference(r.instance, discoveryService, r.client.Scheme()))
 	result.Combine(r.client.ReconcileResource(discoveryService, reconciler.StatePresent))
+
+	discoverRandomAdminSecret, err := helpers.DiscoverRandomAdminSecret(r.client, r.instance)
+	if err == nil {
+		result.CombineErr(ctrl.SetControllerReference(r.instance, discoverRandomAdminSecret, r.client.Scheme()))
+		result.Combine(r.client.ReconcileResource(discoverRandomAdminSecret, reconciler.StatePresent))
+	}
+
+	discoverRandomContextSecret, err := helpers.DiscoverRandomContextSecret(r.client, r.instance)
+	if err == nil {
+		result.CombineErr(ctrl.SetControllerReference(r.instance, discoverRandomContextSecret, r.client.Scheme()))
+		result.Combine(r.client.ReconcileResource(discoverRandomContextSecret, reconciler.StatePresent))
+	}
 
 	passwordSecret := builders.PasswordSecret(r.instance, username, password)
 	result.CombineErr(ctrl.SetControllerReference(r.instance, passwordSecret, r.client.Scheme()))
