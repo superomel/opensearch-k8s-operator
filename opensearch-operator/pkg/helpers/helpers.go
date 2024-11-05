@@ -1,13 +1,18 @@
 package helpers
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"reflect"
 	"sort"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v2"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
@@ -32,6 +37,13 @@ const (
 
 	stsRevisionLabel = "controller-revision-hash"
 )
+
+type InternalUserYaml struct {
+	Hash         string   `yaml:"hash"`
+	Reserved     bool     `yaml:"reserved"`
+	BackendRoles []string `yaml:"backend_roles"`
+	Description  string   `yaml:"description"`
+}
 
 func ContainsString(slice []string, s string) bool {
 	for _, item := range slice {
@@ -128,6 +140,99 @@ func CreateRandomSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster
 		return nil
 	}
 	return err
+}
+
+func generateRandomPassword(length int) (string, error) {
+	// Define the set of characters you want to use for the password
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	var password []byte
+
+	for i := 0; i < length; i++ {
+		// Generate a random index for the charset
+		randomIndex, err := rand.Int(rand.Reader, big.NewInt(int64(len(charset))))
+		if err != nil {
+			return "", err
+		}
+
+		// Append the random character to the password slice
+		password = append(password, charset[randomIndex.Int64()])
+	}
+
+	return string(password), nil
+}
+
+func PatchRandomSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) (bool, error) {
+	randomPasword, _ := generateRandomPassword(15)
+	err := updateAdminSecret(k8sClient, cr.Spec.Security.Config.AdminCredentialsSecret.Name, cr.Namespace, randomPasword)
+	if err != nil {
+		return false, err
+	}
+	err = updateContextSecret(k8sClient, cr.Spec.Security.Config.SecurityconfigSecret.Name, cr.Namespace, randomPasword)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func updateAdminSecret(k8sClient k8s.K8sClient, secretName string, namespace string, randomPassword string) error {
+	adminSecret, err := k8sClient.GetSecret(secretName, namespace)
+	if err != nil {
+		return err
+	}
+	adminSecret.Data["password"] = []byte(base64.StdEncoding.EncodeToString([]byte(randomPassword)))
+	err = k8sClient.UpdateSecret(&adminSecret)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func updateContextSecret(k8sClient k8s.K8sClient, secretName string, namespace string, randomPassword string) error {
+	contextSecret, err := k8sClient.GetSecret(secretName, namespace)
+	if err != nil {
+		return err
+	}
+	internalUsers := contextSecret.Data["internal_users.yml"]
+
+	// decodedYaml, err := base64.StdEncoding.DecodeString(string(internalUsers))
+	// if err != nil {
+	// 	return err
+	// }
+
+	var data map[string]InternalUserYaml
+	if err := yaml.Unmarshal(internalUsers, &data); err != nil {
+		return err
+	}
+
+	// // Update the admin password hash
+	// _, ok := data["admin"].(map[interface{}]interface{})
+	// if !ok {
+	// 	return fmt.Errorf("admin key not found in YAML")
+	// }
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(randomPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	user := data["admin"]
+	user.Hash = string(hash)
+	data["admin"] = user
+
+	// Marshal the updated data back to YAML
+	modifiedYaml, err := yaml.Marshal(data)
+	if err != nil {
+		return err
+	}
+
+	// // Update the secret data with the modified YAML
+	contextSecret.Data["internal_users.yml"] = modifiedYaml
+
+	// Update the secret
+	err = k8sClient.UpdateSecret(&contextSecret)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func CreateCustomAdminSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) (bool, error) {
@@ -228,7 +333,7 @@ func SecurityContextGenerator(config string) []byte {
 	} else if config == "config.yml" {
 		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogImNvbmZpZyIKICBjb25maWdfdmVyc2lvbjogIjIiCmNvbmZpZzoKICBkeW5hbWljOgogICAgaHR0cDoKICAgICAgYW5vbnltb3VzX2F1dGhfZW5hYmxlZDogZmFsc2UKICAgIGF1dGhjOgogICAgICBiYXNpY19pbnRlcm5hbF9hdXRoX2RvbWFpbjoKICAgICAgICBodHRwX2VuYWJsZWQ6IHRydWUKICAgICAgICB0cmFuc3BvcnRfZW5hYmxlZDogdHJ1ZQogICAgICAgIG9yZGVyOiAiNCIKICAgICAgICBodHRwX2F1dGhlbnRpY2F0b3I6CiAgICAgICAgICB0eXBlOiBiYXNpYwogICAgICAgICAgY2hhbGxlbmdlOiB0cnVlCiAgICAgICAgYXV0aGVudGljYXRpb25fYmFja2VuZDoKICAgICAgICAgIHR5cGU6IGludGVybg==")
 	} else if config == "internal_users.yml" {
-		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogImludGVybmFsdXNlcnMiCiAgY29uZmlnX3ZlcnNpb246IDIKYWRtaW46CiAgaGFzaDogIiQyYSQxMiQybkgubUhCdHdzSDJsZE1sVk0xZGZ1MVpoRWZYR1Z1QnVPOXY4OG9UWjBBNXNSRjhzcUNSTyIKICByZXNlcnZlZDogdHJ1ZQogIGJhY2tlbmRfcm9sZXM6CiAgLSAiYWRtaW4iCiAgZGVzY3JpcHRpb246ICJEZW1vIGFkbWluIHVzZXIiCmRhc2hib2FyZHVzZXI6CiAgaGFzaDogIiQyYSQxMiQ0QWNnQXQzeHdPV2FkQTVzNWJsTDZldjM5T1hETmhtT2VzRW9vMzNlWnRycTJOMFlyVTNILiIKICByZXNlcnZlZDogdHJ1ZQogIGRlc2NyaXB0aW9uOiAiRGVtbyBPcGVuU2VhcmNoIERhc2hib2FyZHMgdXNlciI=")
+		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogImludGVybmFsdXNlcnMiCiAgY29uZmlnX3ZlcnNpb246IDIKYWRtaW46CiAgaGFzaDogIiQyYSQxMiQybkgubUhCdHdzSDJsZE1sVk0xZGZ1MVpoRWZYR1Z1QnVPOXY4OG9UWjBBNXNSRjhzcUNSTyIKICByZXNlcnZlZDogdHJ1ZQogIGJhY2tlbmRfcm9sZXM6CiAgLSAiYWRtaW4iCiAgZGVzY3JpcHRpb246ICJEZW1vIGFkbWluIHVzZXIiCmRhc2hib2FyZHVzZXI6CiAgaGFzaDogIiQyYSQxMiROMHFmRlhjdWZUeDFYV3F5dXpGLzYualVNRXJSb0tzT3FzZmJSVW1TSzlZRnNrUGVRbUtwYSIKICByZXNlcnZlZDogdHJ1ZQogIGRlc2NyaXB0aW9uOiAiRGVtbyBPcGVuU2VhcmNoIERhc2hib2FyZHMgdXNlciI=")
 	} else if config == "nodes_dn.yml" {
 		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogIm5vZGVzZG4iCiAgY29uZmlnX3ZlcnNpb246IDI=")
 	} else if config == "roles.yml" {

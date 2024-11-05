@@ -342,6 +342,7 @@ type ClusterStatus struct {
 	// AvailableNodes is the number of available instances.
 	AvailableNodes int32            `json:"availableNodes,omitempty"`
 	Health         OpenSearchHealth `json:"health,omitempty"`
+	SecretPatched  bool             `json:"secretpatched,omitempty"`
 }
 
 // +kubebuilder:object:root=true
