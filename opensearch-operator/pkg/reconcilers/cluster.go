@@ -59,11 +59,6 @@ func NewClusterReconciler(
 func (r *ClusterReconciler) Reconcile() (ctrl.Result, error) {
 	// lg := log.FromContext(r.ctx)
 	result := reconciler.CombinedResult{}
-	// Create random custom secrets
-	// err := helpers.CreateRandomSecrets(r.client, r.instance)
-	// if err != nil {
-	// 	return ctrl.Result{}, err
-	// }
 	username, password, err := helpers.UsernameAndPassword(r.client, r.instance)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -143,6 +138,22 @@ func (r *ClusterReconciler) Reconcile() (ctrl.Result, error) {
 
 	// Update the CR status to reflect the current OpenSearch health and nodes
 	result.CombineErr(r.UpdateClusterStatus())
+
+	if r.instance.Status.Health == "green" && !r.instance.Status.SecretPatched && r.instance.Spec.Security.RandomAdminSecrets {
+		// if !r.instance.Status.SecretPatched && r.instance.Spec.Security.RandomAdminSecrets {
+		r.logger.Info("Cluster with default credentials initialized. Generate random secrets.")
+		changed, err := helpers.PatchRandomSecrets(r.client, r.instance)
+		if changed {
+			// r.instance.Status.SecretPatched = true
+			err := r.client.UpdateOpenSearchClusterStatus(client.ObjectKeyFromObject(r.instance), func(instance *opsterv1.OpenSearchCluster) {
+				instance.Status.SecretPatched = true
+			})
+			result.CombineErr(err)
+			r.logger.Info("Cluster  default credentials changed.")
+		} else {
+			r.logger.Error(err, "Cluster  default credentials not changed.")
+		}
+	}
 
 	return result.Result, result.Err
 }
