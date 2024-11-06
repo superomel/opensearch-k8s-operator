@@ -38,11 +38,22 @@ const (
 	stsRevisionLabel = "controller-revision-hash"
 )
 
-type InternalUserYaml struct {
+type User struct {
 	Hash         string   `yaml:"hash"`
 	Reserved     bool     `yaml:"reserved"`
-	BackendRoles []string `yaml:"backend_roles"`
+	BackendRoles []string `yaml:"backend_roles,omitempty"`
 	Description  string   `yaml:"description"`
+}
+
+type Meta struct {
+	Type          string `yaml:"type"`
+	ConfigVersion int    `yaml:"config_version"`
+}
+
+type InternalUserConfig struct {
+	Meta          Meta `yaml:"_meta"`
+	Admin         User `yaml:"admin"`
+	DashboardUser User `yaml:"dashboarduser"`
 }
 
 func ContainsString(slice []string, s string) bool {
@@ -179,7 +190,7 @@ func updateAdminSecret(k8sClient k8s.K8sClient, secretName string, namespace str
 	if err != nil {
 		return err
 	}
-	adminSecret.Data["password"] = []byte(base64.StdEncoding.EncodeToString([]byte(randomPassword)))
+	adminSecret.Data["password"] = []byte(randomPassword)
 	err = k8sClient.UpdateSecret(&adminSecret)
 	if err != nil {
 		return err
@@ -199,24 +210,17 @@ func updateContextSecret(k8sClient k8s.K8sClient, secretName string, namespace s
 	// 	return err
 	// }
 
-	var data map[string]InternalUserYaml
+	var data InternalUserConfig
 	if err := yaml.Unmarshal(internalUsers, &data); err != nil {
 		return err
 	}
 
-	// // Update the admin password hash
-	// _, ok := data["admin"].(map[interface{}]interface{})
-	// if !ok {
-	// 	return fmt.Errorf("admin key not found in YAML")
-	// }
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(randomPassword), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(randomPassword), 12)
 	if err != nil {
 		return err
 	}
-	user := data["admin"]
-	user.Hash = string(hash)
-	data["admin"] = user
+
+	data.Admin.Hash = string(hash)
 
 	// Marshal the updated data back to YAML
 	modifiedYaml, err := yaml.Marshal(data)

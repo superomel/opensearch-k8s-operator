@@ -88,6 +88,7 @@ func NewSecurityconfigReconciler(
 }
 
 func (r *SecurityconfigReconciler) Reconcile() (ctrl.Result, error) {
+
 	if r.instance.Spec.Security == nil {
 		return ctrl.Result{}, nil
 	}
@@ -106,6 +107,23 @@ func (r *SecurityconfigReconciler) Reconcile() (ctrl.Result, error) {
 		r.logger.Info("Cluster is running with demo certificates.")
 		r.recorder.AnnotatedEventf(r.instance, annotations, "Warning", "Security", "Notice - Cluster is running with demo certificates")
 		return ctrl.Result{}, nil
+	}
+
+	if r.instance.Status.Health == "green" && !r.instance.Status.SecretPatched && r.instance.Spec.Security.RandomAdminSecrets {
+		// if !r.instance.Status.SecretPatched && r.instance.Spec.Security.RandomAdminSecrets {
+		r.logger.Info("Cluster with default credentials initialized. Generate random secrets.")
+		changed, err := helpers.PatchRandomSecrets(r.client, r.instance)
+		if changed {
+			// r.instance.Status.SecretPatched = true
+			err := r.client.UpdateOpenSearchClusterStatus(client.ObjectKeyFromObject(r.instance), func(instance *opsterv1.OpenSearchCluster) {
+				instance.Status.SecretPatched = true
+			})
+			// r.callUpdateSecurityConfigJob()
+			r.logger.Info("Cluster  default credentials changed.")
+			return ctrl.Result{}, err
+		} else {
+			r.logger.Error(err, "Cluster  default credentials not changed.")
+		}
 	}
 
 	// Checking if Security Config values are empty and creates a default-securityconfig secret
@@ -295,4 +313,41 @@ func (r *SecurityconfigReconciler) securityconfigSubpaths(instance *opsterv1.Ope
 // BuildClusterSvcHostName builds the cluster host name as {svc-name}.{namespace}.svc.{dns-base}
 func BuildClusterSvcHostName(instance *opsterv1.OpenSearchCluster) string {
 	return fmt.Sprintf("%s.svc.%s", builders.DnsOfService(instance), helpers.ClusterDnsBase())
+}
+
+func (r *SecurityconfigReconciler) callUpdateSecurityConfigJob() (*ctrl.Result, error) {
+	clusterName := r.instance.Name
+	namespace := r.instance.Namespace
+	configSecretName := r.instance.Spec.Security.Config.SecurityconfigSecret.Name
+	jobName := clusterName + "-securityconfig-update"
+	job, err := r.client.GetJob(jobName, namespace)
+	if err == nil {
+		r.logger.Info("Deleting old update job")
+		err := r.client.DeleteJob(&job)
+		if err != nil {
+			return &ctrl.Result{}, err
+		}
+	}
+	configSecret, _ := r.client.GetSecret(configSecretName, namespace)
+	cmdArg := BuildCmdArg(r.instance, &configSecret, r.logger)
+	adminCertName := fmt.Sprintf("%s-admin-cert", r.instance.Name)
+	checksumval, _ := checksum(configSecret.Data)
+
+	job = builders.NewSecurityconfigUpdateJob(
+		r.instance,
+		jobName,
+		namespace,
+		checksumval,
+		adminCertName,
+		cmdArg,
+		r.reconcilerContext.Volumes,
+		r.reconcilerContext.VolumeMounts,
+	)
+	if err := ctrl.SetControllerReference(r.instance, &job, r.client.Scheme()); err != nil {
+		return &ctrl.Result{}, err
+	}
+
+	_, err = r.client.CreateJob(&job)
+	return &ctrl.Result{}, err
+
 }

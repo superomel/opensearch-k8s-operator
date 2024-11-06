@@ -5327,6 +5327,8 @@ spec:
                             type: object
                         type: object
                     type: object
+                  randomadminsecrets:
+                    type: boolean
                   tls:
                     description: Configure tls usage for transport and http interface
                     properties:
@@ -5454,6 +5456,8 @@ spec:
                   INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
                   Important: Run "make" to regenerate code after modifying this file
                 type: string
+              secretpatched:
+                type: boolean
               version:
                 type: string
             required:
