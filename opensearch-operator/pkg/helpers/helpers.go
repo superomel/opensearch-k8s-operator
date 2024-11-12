@@ -2,7 +2,6 @@ package helpers
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,20 +137,20 @@ func FindByPath(obj interface{}, keys []string) (interface{}, bool) {
 	return val, ok
 }
 
-func CreateRandomSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) error {
-	createdAdmin, err := CreateCustomAdminSecrets(k8sClient, cr)
-	if err != nil {
-		return err
-	}
-	createdContext, err := CreateCustomAdminContextSecrets(k8sClient, cr)
-	if err != nil {
-		return err
-	}
-	if createdAdmin && createdContext {
-		return nil
-	}
-	return err
-}
+// func CreateRandomSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) error {
+// 	createdAdmin, err := CreateCustomAdminSecrets(k8sClient, cr)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	createdContext, err := CreateCustomAdminContextSecrets(k8sClient, cr)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	if createdAdmin && createdContext {
+// 		return nil
+// 	}
+// 	return err
+// }
 
 func generateRandomPassword(length int) (string, error) {
 	// Define the set of characters you want to use for the password
@@ -172,52 +171,188 @@ func generateRandomPassword(length int) (string, error) {
 	return string(password), nil
 }
 
-func PatchRandomSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) (bool, error) {
-	randomPasword, _ := generateRandomPassword(15)
-	err := updateAdminSecret(k8sClient, cr.Spec.Security.Config.AdminCredentialsSecret.Name, cr.Namespace, randomPasword)
+// func PatchRandomSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) (bool, error) {
+// 	randomPasword, _ := generateRandomPassword(15)
+// 	err := updateAdminSecret(k8sClient, cr.Spec.Security.Config.AdminCredentialsSecret.Name, cr.Namespace, randomPasword)
+// 	if err != nil {
+// 		return false, err
+// 	}
+// 	err = updateContextSecret(k8sClient, cr.Spec.Security.Config.SecurityconfigSecret.Name, cr.Namespace, randomPasword)
+// 	if err != nil {
+// 		return false, err
+// 	}
+// 	return true, nil
+// }
+
+// func updateAdminSecret(k8sClient k8s.K8sClient, secretName string, namespace string, randomPassword string) error {
+// 	adminSecret, err := k8sClient.GetSecret(secretName, namespace)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	adminSecret.Data["password"] = []byte(randomPassword)
+// 	err = k8sClient.UpdateSecret(&adminSecret)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	return nil
+// }
+
+// func updateContextSecret(k8sClient k8s.K8sClient, secretName string, namespace string, randomPassword string) error {
+// 	contextSecret, err := k8sClient.GetSecret(secretName, namespace)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	internalUsers := contextSecret.Data["internal_users.yml"]
+
+// 	// decodedYaml, err := base64.StdEncoding.DecodeString(string(internalUsers))
+// 	// if err != nil {
+// 	// 	return err
+// 	// }
+
+// 	var data InternalUserConfig
+// 	if err := yaml.Unmarshal(internalUsers, &data); err != nil {
+// 		return err
+// 	}
+
+// 	hash, err := bcrypt.GenerateFromPassword([]byte(randomPassword), 12)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	data.Admin.Hash = string(hash)
+
+// 	// Marshal the updated data back to YAML
+// 	modifiedYaml, err := yaml.Marshal(data)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	// // Update the secret data with the modified YAML
+// 	contextSecret.Data["internal_users.yml"] = modifiedYaml
+
+// 	// Update the secret
+// 	err = k8sClient.UpdateSecret(&contextSecret)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	return nil
+// }
+
+func CreateCustomAdminSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) (bool, error) {
+	randomPassword, _ := generateRandomPassword(15)
+
+	adminSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cr.Spec.Security.Config.AdminCredentialsSecret.Name,
+			Namespace: cr.Namespace,
+		},
+		StringData: map[string]string{
+			"username": "admin",
+			"password": randomPassword,
+		},
+	}
+	_, err := k8sClient.CreateSecret(adminSecret)
 	if err != nil {
 		return false, err
 	}
-	err = updateContextSecret(k8sClient, cr.Spec.Security.Config.SecurityconfigSecret.Name, cr.Namespace, randomPasword)
+	return true, nil
+
+}
+
+func CreateCustomAdminContextSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) (bool, error) {
+
+	adminSecret, err := k8sClient.GetSecret(cr.Spec.Security.Config.AdminCredentialsSecret.Name, cr.Namespace)
+	if err != nil {
+		return false, err
+	}
+	randomPassword := adminSecret.Data["password"]
+
+	contextSecretTemplate, err := k8sClient.GetSecret(cr.Spec.Security.Config.SecurityconfigSecretTemplate.Name, cr.Namespace)
+	if err != nil {
+		return false, err
+	}
+
+	internalUsers := contextSecretTemplate.Data["internal_users.yml"]
+
+	internalUsers, err = internalUsersGenerator(internalUsers, randomPassword)
+	if err != nil {
+		return false, err
+	}
+
+	contextSecret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cr.Spec.Security.Config.SecurityconfigSecret.Name,
+			Namespace: cr.Namespace,
+		},
+		Data: map[string][]byte{
+			"action_groups.yml":  contextSecretTemplate.Data["action_groups.yml"],
+			"config.yml":         contextSecretTemplate.Data["config.yml"],
+			"internal_users.yml": internalUsers,
+			"nodes_dn.yml":       contextSecretTemplate.Data["nodes_dn.yml"],
+			"roles.yml":          contextSecretTemplate.Data["roles.yml"],
+			"roles_mapping.yml":  contextSecretTemplate.Data["roles_mapping.yml"],
+			"tenants.yml":        contextSecretTemplate.Data["tenants.yml"],
+			"whitelist.yml":      contextSecretTemplate.Data["whitelist.yml"],
+		},
+	}
+	_, err = k8sClient.CreateSecret(contextSecret)
 	if err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func updateAdminSecret(k8sClient k8s.K8sClient, secretName string, namespace string, randomPassword string) error {
-	adminSecret, err := k8sClient.GetSecret(secretName, namespace)
-	if err != nil {
-		return err
+func NeedToCreateCustomSecret(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster, secretname string) bool {
+	if cr.Spec.Security != nil && secretname != "" && cr.Spec.Security.RandomAdminSecrets {
+		_, err := k8sClient.GetSecret(secretname, cr.Namespace)
+
+		// skip secret creation if already exist
+		if err != nil {
+			if statusErr, ok := err.(*k8serrors.StatusError); ok {
+				statusCode := statusErr.ErrStatus.Code
+				if statusCode == 404 {
+					return true
+				} else {
+					return false
+				}
+			}
+		}
+		return false
 	}
-	adminSecret.Data["password"] = []byte(randomPassword)
-	err = k8sClient.UpdateSecret(&adminSecret)
-	if err != nil {
-		return err
-	}
-	return nil
+	return false
 }
 
-func updateContextSecret(k8sClient k8s.K8sClient, secretName string, namespace string, randomPassword string) error {
-	contextSecret, err := k8sClient.GetSecret(secretName, namespace)
-	if err != nil {
-		return err
-	}
-	internalUsers := contextSecret.Data["internal_users.yml"]
+// func SecurityContextGenerator(config string) []byte {
+// 	var value []byte
+// 	if config == "action_groups.yml" {
+// 		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogImFjdGlvbmdyb3VwcyIKICBjb25maWdfdmVyc2lvbjogMg==")
+// 	} else if config == "config.yml" {
+// 		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogImNvbmZpZyIKICBjb25maWdfdmVyc2lvbjogIjIiCmNvbmZpZzoKICBkeW5hbWljOgogICAgaHR0cDoKICAgICAgYW5vbnltb3VzX2F1dGhfZW5hYmxlZDogZmFsc2UKICAgIGF1dGhjOgogICAgICBiYXNpY19pbnRlcm5hbF9hdXRoX2RvbWFpbjoKICAgICAgICBodHRwX2VuYWJsZWQ6IHRydWUKICAgICAgICB0cmFuc3BvcnRfZW5hYmxlZDogdHJ1ZQogICAgICAgIG9yZGVyOiAiNCIKICAgICAgICBodHRwX2F1dGhlbnRpY2F0b3I6CiAgICAgICAgICB0eXBlOiBiYXNpYwogICAgICAgICAgY2hhbGxlbmdlOiB0cnVlCiAgICAgICAgYXV0aGVudGljYXRpb25fYmFja2VuZDoKICAgICAgICAgIHR5cGU6IGludGVybg==")
+// 	} else if config == "internal_users.yml" {
+// 		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogImludGVybmFsdXNlcnMiCiAgY29uZmlnX3ZlcnNpb246IDIKYWRtaW46CiAgaGFzaDogIiQyYSQxMiQybkgubUhCdHdzSDJsZE1sVk0xZGZ1MVpoRWZYR1Z1QnVPOXY4OG9UWjBBNXNSRjhzcUNSTyIKICByZXNlcnZlZDogdHJ1ZQogIGJhY2tlbmRfcm9sZXM6CiAgLSAiYWRtaW4iCiAgZGVzY3JpcHRpb246ICJEZW1vIGFkbWluIHVzZXIiCmRhc2hib2FyZHVzZXI6CiAgaGFzaDogIiQyYSQxMiROMHFmRlhjdWZUeDFYV3F5dXpGLzYualVNRXJSb0tzT3FzZmJSVW1TSzlZRnNrUGVRbUtwYSIKICByZXNlcnZlZDogdHJ1ZQogIGRlc2NyaXB0aW9uOiAiRGVtbyBPcGVuU2VhcmNoIERhc2hib2FyZHMgdXNlciI=")
+// 	} else if config == "nodes_dn.yml" {
+// 		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogIm5vZGVzZG4iCiAgY29uZmlnX3ZlcnNpb246IDI=")
+// 	} else if config == "roles.yml" {
+// 		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogInJvbGVzIgogIGNvbmZpZ192ZXJzaW9uOiAyCmRhc2hib2FyZF9yZWFkX29ubHk6CiAgcmVzZXJ2ZWQ6IHRydWUKc2VjdXJpdHlfcmVzdF9hcGlfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiMgQWxsb3dzIHVzZXJzIHRvIHZpZXcgbW9uaXRvcnMsIGRlc3RpbmF0aW9ucyBhbmQgYWxlcnRzCmFsZXJ0aW5nX3JlYWRfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hbGVydGluZy9hbGVydHMvZ2V0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FsZXJ0aW5nL2Rlc3RpbmF0aW9uL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hbGVydGluZy9tb25pdG9yL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hbGVydGluZy9tb25pdG9yL3NlYXJjaCcKIyBBbGxvd3MgdXNlcnMgdG8gdmlldyBhbmQgYWNrbm93bGVkZ2UgYWxlcnRzCmFsZXJ0aW5nX2Fja19hbGVydHM6CiAgcmVzZXJ2ZWQ6IHRydWUKICBjbHVzdGVyX3Blcm1pc3Npb25zOgogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FsZXJ0aW5nL2FsZXJ0cy8qJwojIEFsbG93cyB1c2VycyB0byB1c2UgYWxsIGFsZXJ0aW5nIGZ1bmN0aW9uYWxpdHkKYWxlcnRpbmdfZnVsbF9hY2Nlc3M6CiAgcmVzZXJ2ZWQ6IHRydWUKICBjbHVzdGVyX3Blcm1pc3Npb25zOgogICAgLSAnY2x1c3Rlcl9tb25pdG9yJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FsZXJ0aW5nLyonCiAgaW5kZXhfcGVybWlzc2lvbnM6CiAgICAtIGluZGV4X3BhdHRlcm5zOgogICAgICAgIC0gJyonCiAgICAgIGFsbG93ZWRfYWN0aW9uczoKICAgICAgICAtICdpbmRpY2VzX21vbml0b3InCiAgICAgICAgLSAnaW5kaWNlczphZG1pbi9hbGlhc2VzL2dldCcKICAgICAgICAtICdpbmRpY2VzOmFkbWluL21hcHBpbmdzL2dldCcKIyBBbGxvdyB1c2VycyB0byByZWFkIEFub21hbHkgRGV0ZWN0aW9uIGRldGVjdG9ycyBhbmQgcmVzdWx0cwphbm9tYWx5X3JlYWRfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hZC9kZXRlY3Rvci9pbmZvJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FkL2RldGVjdG9yL3NlYXJjaCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hZC9kZXRlY3RvcnMvZ2V0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FkL3Jlc3VsdC9zZWFyY2gnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vYWQvdGFza3Mvc2VhcmNoJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FkL2RldGVjdG9yL3ZhbGlkYXRlJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FkL3Jlc3VsdC90b3BBbm9tYWxpZXMnCiMgQWxsb3dzIHVzZXJzIHRvIHVzZSBhbGwgQW5vbWFseSBEZXRlY3Rpb24gZnVuY3Rpb25hbGl0eQphbm9tYWx5X2Z1bGxfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gJ2NsdXN0ZXJfbW9uaXRvcicKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hZC8qJwogIGluZGV4X3Blcm1pc3Npb25zOgogICAgLSBpbmRleF9wYXR0ZXJuczoKICAgICAgICAtICcqJwogICAgICBhbGxvd2VkX2FjdGlvbnM6CiAgICAgICAgLSAnaW5kaWNlc19tb25pdG9yJwogICAgICAgIC0gJ2luZGljZXM6YWRtaW4vYWxpYXNlcy9nZXQnCiAgICAgICAgLSAnaW5kaWNlczphZG1pbi9tYXBwaW5ncy9nZXQnCiMgQWxsb3dzIHVzZXJzIHRvIHJlYWQgTm90ZWJvb2tzCm5vdGVib29rc19yZWFkX2FjY2VzczoKICByZXNlcnZlZDogdHJ1ZQogIGNsdXN0ZXJfcGVybWlzc2lvbnM6CiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vbm90ZWJvb2tzL2xpc3QnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vbm90ZWJvb2tzL2dldCcKIyBBbGxvd3MgdXNlcnMgdG8gYWxsIE5vdGVib29rcyBmdW5jdGlvbmFsaXR5Cm5vdGVib29rc19mdWxsX2FjY2VzczoKICByZXNlcnZlZDogdHJ1ZQogIGNsdXN0ZXJfcGVybWlzc2lvbnM6CiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vbm90ZWJvb2tzL2NyZWF0ZScKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9ub3RlYm9va3MvdXBkYXRlJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL25vdGVib29rcy9kZWxldGUnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vbm90ZWJvb2tzL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9ub3RlYm9va3MvbGlzdCcKIyBBbGxvd3MgdXNlcnMgdG8gcmVhZCBvYnNlcnZhYmlsaXR5IG9iamVjdHMKb2JzZXJ2YWJpbGl0eV9yZWFkX2FjY2VzczoKICByZXNlcnZlZDogdHJ1ZQogIGNsdXN0ZXJfcGVybWlzc2lvbnM6CiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5zZWFyY2gvb2JzZXJ2YWJpbGl0eS9nZXQnCiMgQWxsb3dzIHVzZXJzIHRvIGFsbCBPYnNlcnZhYmlsaXR5IGZ1bmN0aW9uYWxpdHkKb2JzZXJ2YWJpbGl0eV9mdWxsX2FjY2VzczoKICByZXNlcnZlZDogdHJ1ZQogIGNsdXN0ZXJfcGVybWlzc2lvbnM6CiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5zZWFyY2gvb2JzZXJ2YWJpbGl0eS9jcmVhdGUnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5zZWFyY2gvb2JzZXJ2YWJpbGl0eS91cGRhdGUnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5zZWFyY2gvb2JzZXJ2YWJpbGl0eS9kZWxldGUnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5zZWFyY2gvb2JzZXJ2YWJpbGl0eS9nZXQnCiMgQWxsb3dzIHVzZXJzIHRvIHJlYWQgYW5kIGRvd25sb2FkIFJlcG9ydHMKcmVwb3J0c19pbnN0YW5jZXNfcmVhZF9hY2Nlc3M6CiAgcmVzZXJ2ZWQ6IHRydWUKICBjbHVzdGVyX3Blcm1pc3Npb25zOgogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvaW5zdGFuY2UvbGlzdCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2luc3RhbmNlL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL21lbnUvZG93bmxvYWQnCiMgQWxsb3dzIHVzZXJzIHRvIHJlYWQgYW5kIGRvd25sb2FkIFJlcG9ydHMgYW5kIFJlcG9ydC1kZWZpbml0aW9ucwpyZXBvcnRzX3JlYWRfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2RlZmluaXRpb24vZ2V0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvZGVmaW5pdGlvbi9saXN0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvaW5zdGFuY2UvbGlzdCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2luc3RhbmNlL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL21lbnUvZG93bmxvYWQnCiMgQWxsb3dzIHVzZXJzIHRvIGFsbCBSZXBvcnRzIGZ1bmN0aW9uYWxpdHkKcmVwb3J0c19mdWxsX2FjY2VzczoKICByZXNlcnZlZDogdHJ1ZQogIGNsdXN0ZXJfcGVybWlzc2lvbnM6CiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vcmVwb3J0cy9kZWZpbml0aW9uL2NyZWF0ZScKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2RlZmluaXRpb24vdXBkYXRlJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvZGVmaW5pdGlvbi9vbl9kZW1hbmQnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vcmVwb3J0cy9kZWZpbml0aW9uL2RlbGV0ZScKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2RlZmluaXRpb24vZ2V0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvZGVmaW5pdGlvbi9saXN0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvaW5zdGFuY2UvbGlzdCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2luc3RhbmNlL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL21lbnUvZG93bmxvYWQnCiMgQWxsb3dzIHVzZXJzIHRvIHVzZSBhbGwgYXN5bmNocm9ub3VzLXNlYXJjaCBmdW5jdGlvbmFsaXR5CmFzeW5jaHJvbm91c19zZWFyY2hfZnVsbF9hY2Nlc3M6CiAgcmVzZXJ2ZWQ6IHRydWUKICBjbHVzdGVyX3Blcm1pc3Npb25zOgogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FzeW5jaHJvbm91c19zZWFyY2gvKicKICBpbmRleF9wZXJtaXNzaW9uczoKICAgIC0gaW5kZXhfcGF0dGVybnM6CiAgICAgICAgLSAnKicKICAgICAgYWxsb3dlZF9hY3Rpb25zOgogICAgICAgIC0gJ2luZGljZXM6ZGF0YS9yZWFkL3NlYXJjaConCiMgQWxsb3dzIHVzZXJzIHRvIHJlYWQgc3RvcmVkIGFzeW5jaHJvbm91cy1zZWFyY2ggcmVzdWx0cwphc3luY2hyb25vdXNfc2VhcmNoX3JlYWRfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hc3luY2hyb25vdXNfc2VhcmNoL2dldCcKIyBBbGxvd3MgdXNlciB0byB1c2UgYWxsIGluZGV4X21hbmFnZW1lbnQgYWN0aW9ucyAtIGlzbSBwb2xpY2llcywgcm9sbHVwcywgdHJhbnNmb3JtcwppbmRleF9tYW5hZ2VtZW50X2Z1bGxfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gImNsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9pc20vKiIKICAgIC0gImNsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yb2xsdXAvKiIKICAgIC0gImNsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby90cmFuc2Zvcm0vKiIKICBpbmRleF9wZXJtaXNzaW9uczoKICAgIC0gaW5kZXhfcGF0dGVybnM6CiAgICAgICAgLSAnKicKICAgICAgYWxsb3dlZF9hY3Rpb25zOgogICAgICAgIC0gJ2luZGljZXM6YWRtaW4vb3BlbnNlYXJjaC9pc20vKicKIyBBbGxvd3MgdXNlcnMgdG8gdXNlIGFsbCBjcm9zcyBjbHVzdGVyIHJlcGxpY2F0aW9uIGZ1bmN0aW9uYWxpdHkgYXQgbGVhZGVyIGNsdXN0ZXIKY3Jvc3NfY2x1c3Rlcl9yZXBsaWNhdGlvbl9sZWFkZXJfZnVsbF9hY2Nlc3M6CiAgcmVzZXJ2ZWQ6IHRydWUKICBpbmRleF9wZXJtaXNzaW9uczoKICAgIC0gaW5kZXhfcGF0dGVybnM6CiAgICAgICAgLSAnKicKICAgICAgYWxsb3dlZF9hY3Rpb25zOgogICAgICAgIC0gImluZGljZXM6YWRtaW4vcGx1Z2lucy9yZXBsaWNhdGlvbi9pbmRleC9zZXR1cC92YWxpZGF0ZSIKICAgICAgICAtICJpbmRpY2VzOmRhdGEvcmVhZC9wbHVnaW5zL3JlcGxpY2F0aW9uL2NoYW5nZXMiCiAgICAgICAgLSAiaW5kaWNlczpkYXRhL3JlYWQvcGx1Z2lucy9yZXBsaWNhdGlvbi9maWxlX2NodW5rIgojIEFsbG93cyB1c2VycyB0byB1c2UgYWxsIGNyb3NzIGNsdXN0ZXIgcmVwbGljYXRpb24gZnVuY3Rpb25hbGl0eSBhdCBmb2xsb3dlciBjbHVzdGVyCmNyb3NzX2NsdXN0ZXJfcmVwbGljYXRpb25fZm9sbG93ZXJfZnVsbF9hY2Nlc3M6CiAgcmVzZXJ2ZWQ6IHRydWUKICBjbHVzdGVyX3Blcm1pc3Npb25zOgogICAgLSAiY2x1c3RlcjphZG1pbi9wbHVnaW5zL3JlcGxpY2F0aW9uL2F1dG9mb2xsb3cvdXBkYXRlIgogIGluZGV4X3Blcm1pc3Npb25zOgogICAgLSBpbmRleF9wYXR0ZXJuczoKICAgICAgICAtICcqJwogICAgICBhbGxvd2VkX2FjdGlvbnM6CiAgICAgICAgLSAiaW5kaWNlczphZG1pbi9wbHVnaW5zL3JlcGxpY2F0aW9uL2luZGV4L3NldHVwL3ZhbGlkYXRlIgogICAgICAgIC0gImluZGljZXM6ZGF0YS93cml0ZS9wbHVnaW5zL3JlcGxpY2F0aW9uL2NoYW5nZXMiCiAgICAgICAgLSAiaW5kaWNlczphZG1pbi9wbHVnaW5zL3JlcGxpY2F0aW9uL2luZGV4L3N0YXJ0IgogICAgICAgIC0gImluZGljZXM6YWRtaW4vcGx1Z2lucy9yZXBsaWNhdGlvbi9pbmRleC9wYXVzZSIKICAgICAgICAtICJpbmRpY2VzOmFkbWluL3BsdWdpbnMvcmVwbGljYXRpb24vaW5kZXgvcmVzdW1lIgogICAgICAgIC0gImluZGljZXM6YWRtaW4vcGx1Z2lucy9yZXBsaWNhdGlvbi9pbmRleC9zdG9wIgogICAgICAgIC0gImluZGljZXM6YWRtaW4vcGx1Z2lucy9yZXBsaWNhdGlvbi9pbmRleC91cGRhdGUiCiAgICAgICAgLSAiaW5kaWNlczphZG1pbi9wbHVnaW5zL3JlcGxpY2F0aW9uL2luZGV4L3N0YXR1c19jaGVjayI=")
+// 	} else if config == "roles_mapping.yml" {
+// 		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogInJvbGVzbWFwcGluZyIKICBjb25maWdfdmVyc2lvbjogMgphbGxfYWNjZXNzOgogIHJlc2VydmVkOiBmYWxzZQogIGJhY2tlbmRfcm9sZXM6CiAgLSAiYWRtaW4iCiAgZGVzY3JpcHRpb246ICJNYXBzIGFkbWluIHRvIGFsbF9hY2Nlc3MiCm93bl9pbmRleDoKICByZXNlcnZlZDogZmFsc2UKICB1c2VyczoKICAtICIqIgogIGRlc2NyaXB0aW9uOiAiQWxsb3cgZnVsbCBhY2Nlc3MgdG8gYW4gaW5kZXggbmFtZWQgbGlrZSB0aGUgdXNlcm5hbWUiCnJlYWRhbGw6CiAgcmVzZXJ2ZWQ6IGZhbHNlCiAgYmFja2VuZF9yb2xlczoKICAtICJyZWFkYWxsIgptYW5hZ2Vfc25hcHNob3RzOgogIHJlc2VydmVkOiBmYWxzZQogIGJhY2tlbmRfcm9sZXM6CiAgLSAic25hcHNob3RyZXN0b3JlIgpkYXNoYm9hcmRfc2VydmVyOgogIHJlc2VydmVkOiB0cnVlCiAgdXNlcnM6CiAgLSAiZGFzaGJvYXJkdXNlciI=")
+// 	} else if config == "tenants.yml" {
+// 		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogInRlbmFudHMiCiAgY29uZmlnX3ZlcnNpb246IDI=")
+// 	} else if config == "whitelist.yml" {
+// 		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogIndoaXRlbGlzdCIKICBjb25maWdfdmVyc2lvbjogMg==")
+// 	}
+// 	return value
+// }
 
-	// decodedYaml, err := base64.StdEncoding.DecodeString(string(internalUsers))
-	// if err != nil {
-	// 	return err
-	// }
-
+func internalUsersGenerator(internalUserData, randomPassword []byte) ([]byte, error) { // todo
 	var data InternalUserConfig
-	if err := yaml.Unmarshal(internalUsers, &data); err != nil {
-		return err
+	if err := yaml.Unmarshal(internalUserData, &data); err != nil {
+		return nil, err
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(randomPassword), 12)
+	hash, err := bcrypt.GenerateFromPassword(randomPassword, 12)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	data.Admin.Hash = string(hash)
@@ -225,131 +360,9 @@ func updateContextSecret(k8sClient k8s.K8sClient, secretName string, namespace s
 	// Marshal the updated data back to YAML
 	modifiedYaml, err := yaml.Marshal(data)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	// // Update the secret data with the modified YAML
-	contextSecret.Data["internal_users.yml"] = modifiedYaml
-
-	// Update the secret
-	err = k8sClient.UpdateSecret(&contextSecret)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func CreateCustomAdminSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) (bool, error) {
-	if cr.Spec.Security != nil && cr.Spec.Security.Config.AdminCredentialsSecret.Name != "" && cr.Spec.Security.RandomAdminSecrets {
-		credentialsSecret, err := k8sClient.GetSecret(cr.Spec.Security.Config.AdminCredentialsSecret.Name, cr.Namespace)
-
-		// skip secret creation if already exist
-		if err != nil {
-			if statusErr, ok := err.(*k8serrors.StatusError); ok {
-				statusCode := statusErr.ErrStatus.Code
-				if statusCode != 404 {
-					return false, err
-				}
-			}
-		} else {
-			// check if secret exist
-			_, usernameExists := credentialsSecret.Data["username"]
-			_, passwordExists := credentialsSecret.Data["password"]
-
-			// skip creation of secrets
-			if usernameExists && passwordExists {
-				return true, nil
-			}
-		}
-
-		adminSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      cr.Spec.Security.Config.AdminCredentialsSecret.Name,
-				Namespace: cr.Namespace,
-			},
-			StringData: map[string]string{
-				"username": "admin",
-				"password": "admin",
-			},
-		}
-		_, err = k8sClient.CreateSecret(adminSecret)
-		if err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	return true, nil
-}
-
-func CreateCustomAdminContextSecrets(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) (bool, error) {
-	if cr.Spec.Security != nil && cr.Spec.Security.Config.SecurityconfigSecret.Name != "" && cr.Spec.Security.RandomAdminSecrets {
-		credentialsSecret, err := k8sClient.GetSecret(cr.Spec.Security.Config.SecurityconfigSecret.Name, cr.Namespace)
-
-		// skip secret creation if already exist
-		if err != nil {
-			if statusErr, ok := err.(*k8serrors.StatusError); ok {
-				statusCode := statusErr.ErrStatus.Code
-				if statusCode != 404 {
-					return false, err
-				}
-			}
-		} else {
-			// check if secret exist
-			_, internalUsersExists := credentialsSecret.Data["internal_users.yml"]
-
-			// skip creation of secrets
-			if internalUsersExists {
-				return true, nil
-			}
-		}
-
-		contextSecret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      cr.Spec.Security.Config.SecurityconfigSecret.Name,
-				Namespace: cr.Namespace,
-			},
-			Data: map[string][]byte{
-				"action_groups.yml":  SecurityContextGenerator("action_groups.yml"),
-				"config.yml":         SecurityContextGenerator("config.yml"),
-				"internal_users.yml": SecurityContextGenerator("internal_users.yml"),
-				"nodes_dn.yml":       SecurityContextGenerator("nodes_dn.yml"),
-				"roles.yml":          SecurityContextGenerator("roles.yml"),
-				"roles_mapping.yml":  SecurityContextGenerator("roles_mapping.yml"),
-				"tenants.yml":        SecurityContextGenerator("tenants.yml"),
-				"whitelist.yml":      SecurityContextGenerator("whitelist.yml"),
-			},
-		}
-		_, err = k8sClient.CreateSecret(contextSecret)
-
-		if err != nil {
-			return false, err
-		}
-		return true, nil
-	}
-	// no need to create random secrets
-	return true, nil
-}
-
-func SecurityContextGenerator(config string) []byte {
-	var value []byte
-	if config == "action_groups.yml" {
-		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogImFjdGlvbmdyb3VwcyIKICBjb25maWdfdmVyc2lvbjogMg==")
-	} else if config == "config.yml" {
-		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogImNvbmZpZyIKICBjb25maWdfdmVyc2lvbjogIjIiCmNvbmZpZzoKICBkeW5hbWljOgogICAgaHR0cDoKICAgICAgYW5vbnltb3VzX2F1dGhfZW5hYmxlZDogZmFsc2UKICAgIGF1dGhjOgogICAgICBiYXNpY19pbnRlcm5hbF9hdXRoX2RvbWFpbjoKICAgICAgICBodHRwX2VuYWJsZWQ6IHRydWUKICAgICAgICB0cmFuc3BvcnRfZW5hYmxlZDogdHJ1ZQogICAgICAgIG9yZGVyOiAiNCIKICAgICAgICBodHRwX2F1dGhlbnRpY2F0b3I6CiAgICAgICAgICB0eXBlOiBiYXNpYwogICAgICAgICAgY2hhbGxlbmdlOiB0cnVlCiAgICAgICAgYXV0aGVudGljYXRpb25fYmFja2VuZDoKICAgICAgICAgIHR5cGU6IGludGVybg==")
-	} else if config == "internal_users.yml" {
-		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogImludGVybmFsdXNlcnMiCiAgY29uZmlnX3ZlcnNpb246IDIKYWRtaW46CiAgaGFzaDogIiQyYSQxMiQybkgubUhCdHdzSDJsZE1sVk0xZGZ1MVpoRWZYR1Z1QnVPOXY4OG9UWjBBNXNSRjhzcUNSTyIKICByZXNlcnZlZDogdHJ1ZQogIGJhY2tlbmRfcm9sZXM6CiAgLSAiYWRtaW4iCiAgZGVzY3JpcHRpb246ICJEZW1vIGFkbWluIHVzZXIiCmRhc2hib2FyZHVzZXI6CiAgaGFzaDogIiQyYSQxMiROMHFmRlhjdWZUeDFYV3F5dXpGLzYualVNRXJSb0tzT3FzZmJSVW1TSzlZRnNrUGVRbUtwYSIKICByZXNlcnZlZDogdHJ1ZQogIGRlc2NyaXB0aW9uOiAiRGVtbyBPcGVuU2VhcmNoIERhc2hib2FyZHMgdXNlciI=")
-	} else if config == "nodes_dn.yml" {
-		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogIm5vZGVzZG4iCiAgY29uZmlnX3ZlcnNpb246IDI=")
-	} else if config == "roles.yml" {
-		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogInJvbGVzIgogIGNvbmZpZ192ZXJzaW9uOiAyCmRhc2hib2FyZF9yZWFkX29ubHk6CiAgcmVzZXJ2ZWQ6IHRydWUKc2VjdXJpdHlfcmVzdF9hcGlfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiMgQWxsb3dzIHVzZXJzIHRvIHZpZXcgbW9uaXRvcnMsIGRlc3RpbmF0aW9ucyBhbmQgYWxlcnRzCmFsZXJ0aW5nX3JlYWRfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hbGVydGluZy9hbGVydHMvZ2V0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FsZXJ0aW5nL2Rlc3RpbmF0aW9uL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hbGVydGluZy9tb25pdG9yL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hbGVydGluZy9tb25pdG9yL3NlYXJjaCcKIyBBbGxvd3MgdXNlcnMgdG8gdmlldyBhbmQgYWNrbm93bGVkZ2UgYWxlcnRzCmFsZXJ0aW5nX2Fja19hbGVydHM6CiAgcmVzZXJ2ZWQ6IHRydWUKICBjbHVzdGVyX3Blcm1pc3Npb25zOgogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FsZXJ0aW5nL2FsZXJ0cy8qJwojIEFsbG93cyB1c2VycyB0byB1c2UgYWxsIGFsZXJ0aW5nIGZ1bmN0aW9uYWxpdHkKYWxlcnRpbmdfZnVsbF9hY2Nlc3M6CiAgcmVzZXJ2ZWQ6IHRydWUKICBjbHVzdGVyX3Blcm1pc3Npb25zOgogICAgLSAnY2x1c3Rlcl9tb25pdG9yJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FsZXJ0aW5nLyonCiAgaW5kZXhfcGVybWlzc2lvbnM6CiAgICAtIGluZGV4X3BhdHRlcm5zOgogICAgICAgIC0gJyonCiAgICAgIGFsbG93ZWRfYWN0aW9uczoKICAgICAgICAtICdpbmRpY2VzX21vbml0b3InCiAgICAgICAgLSAnaW5kaWNlczphZG1pbi9hbGlhc2VzL2dldCcKICAgICAgICAtICdpbmRpY2VzOmFkbWluL21hcHBpbmdzL2dldCcKIyBBbGxvdyB1c2VycyB0byByZWFkIEFub21hbHkgRGV0ZWN0aW9uIGRldGVjdG9ycyBhbmQgcmVzdWx0cwphbm9tYWx5X3JlYWRfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hZC9kZXRlY3Rvci9pbmZvJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FkL2RldGVjdG9yL3NlYXJjaCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hZC9kZXRlY3RvcnMvZ2V0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FkL3Jlc3VsdC9zZWFyY2gnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vYWQvdGFza3Mvc2VhcmNoJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FkL2RldGVjdG9yL3ZhbGlkYXRlJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FkL3Jlc3VsdC90b3BBbm9tYWxpZXMnCiMgQWxsb3dzIHVzZXJzIHRvIHVzZSBhbGwgQW5vbWFseSBEZXRlY3Rpb24gZnVuY3Rpb25hbGl0eQphbm9tYWx5X2Z1bGxfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gJ2NsdXN0ZXJfbW9uaXRvcicKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hZC8qJwogIGluZGV4X3Blcm1pc3Npb25zOgogICAgLSBpbmRleF9wYXR0ZXJuczoKICAgICAgICAtICcqJwogICAgICBhbGxvd2VkX2FjdGlvbnM6CiAgICAgICAgLSAnaW5kaWNlc19tb25pdG9yJwogICAgICAgIC0gJ2luZGljZXM6YWRtaW4vYWxpYXNlcy9nZXQnCiAgICAgICAgLSAnaW5kaWNlczphZG1pbi9tYXBwaW5ncy9nZXQnCiMgQWxsb3dzIHVzZXJzIHRvIHJlYWQgTm90ZWJvb2tzCm5vdGVib29rc19yZWFkX2FjY2VzczoKICByZXNlcnZlZDogdHJ1ZQogIGNsdXN0ZXJfcGVybWlzc2lvbnM6CiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vbm90ZWJvb2tzL2xpc3QnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vbm90ZWJvb2tzL2dldCcKIyBBbGxvd3MgdXNlcnMgdG8gYWxsIE5vdGVib29rcyBmdW5jdGlvbmFsaXR5Cm5vdGVib29rc19mdWxsX2FjY2VzczoKICByZXNlcnZlZDogdHJ1ZQogIGNsdXN0ZXJfcGVybWlzc2lvbnM6CiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vbm90ZWJvb2tzL2NyZWF0ZScKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9ub3RlYm9va3MvdXBkYXRlJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL25vdGVib29rcy9kZWxldGUnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vbm90ZWJvb2tzL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9ub3RlYm9va3MvbGlzdCcKIyBBbGxvd3MgdXNlcnMgdG8gcmVhZCBvYnNlcnZhYmlsaXR5IG9iamVjdHMKb2JzZXJ2YWJpbGl0eV9yZWFkX2FjY2VzczoKICByZXNlcnZlZDogdHJ1ZQogIGNsdXN0ZXJfcGVybWlzc2lvbnM6CiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5zZWFyY2gvb2JzZXJ2YWJpbGl0eS9nZXQnCiMgQWxsb3dzIHVzZXJzIHRvIGFsbCBPYnNlcnZhYmlsaXR5IGZ1bmN0aW9uYWxpdHkKb2JzZXJ2YWJpbGl0eV9mdWxsX2FjY2VzczoKICByZXNlcnZlZDogdHJ1ZQogIGNsdXN0ZXJfcGVybWlzc2lvbnM6CiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5zZWFyY2gvb2JzZXJ2YWJpbGl0eS9jcmVhdGUnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5zZWFyY2gvb2JzZXJ2YWJpbGl0eS91cGRhdGUnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5zZWFyY2gvb2JzZXJ2YWJpbGl0eS9kZWxldGUnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5zZWFyY2gvb2JzZXJ2YWJpbGl0eS9nZXQnCiMgQWxsb3dzIHVzZXJzIHRvIHJlYWQgYW5kIGRvd25sb2FkIFJlcG9ydHMKcmVwb3J0c19pbnN0YW5jZXNfcmVhZF9hY2Nlc3M6CiAgcmVzZXJ2ZWQ6IHRydWUKICBjbHVzdGVyX3Blcm1pc3Npb25zOgogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvaW5zdGFuY2UvbGlzdCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2luc3RhbmNlL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL21lbnUvZG93bmxvYWQnCiMgQWxsb3dzIHVzZXJzIHRvIHJlYWQgYW5kIGRvd25sb2FkIFJlcG9ydHMgYW5kIFJlcG9ydC1kZWZpbml0aW9ucwpyZXBvcnRzX3JlYWRfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2RlZmluaXRpb24vZ2V0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvZGVmaW5pdGlvbi9saXN0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvaW5zdGFuY2UvbGlzdCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2luc3RhbmNlL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL21lbnUvZG93bmxvYWQnCiMgQWxsb3dzIHVzZXJzIHRvIGFsbCBSZXBvcnRzIGZ1bmN0aW9uYWxpdHkKcmVwb3J0c19mdWxsX2FjY2VzczoKICByZXNlcnZlZDogdHJ1ZQogIGNsdXN0ZXJfcGVybWlzc2lvbnM6CiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vcmVwb3J0cy9kZWZpbml0aW9uL2NyZWF0ZScKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2RlZmluaXRpb24vdXBkYXRlJwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvZGVmaW5pdGlvbi9vbl9kZW1hbmQnCiAgICAtICdjbHVzdGVyOmFkbWluL29wZW5kaXN0cm8vcmVwb3J0cy9kZWZpbml0aW9uL2RlbGV0ZScKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2RlZmluaXRpb24vZ2V0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvZGVmaW5pdGlvbi9saXN0JwogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL3JlcG9ydHMvaW5zdGFuY2UvbGlzdCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL2luc3RhbmNlL2dldCcKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yZXBvcnRzL21lbnUvZG93bmxvYWQnCiMgQWxsb3dzIHVzZXJzIHRvIHVzZSBhbGwgYXN5bmNocm9ub3VzLXNlYXJjaCBmdW5jdGlvbmFsaXR5CmFzeW5jaHJvbm91c19zZWFyY2hfZnVsbF9hY2Nlc3M6CiAgcmVzZXJ2ZWQ6IHRydWUKICBjbHVzdGVyX3Blcm1pc3Npb25zOgogICAgLSAnY2x1c3RlcjphZG1pbi9vcGVuZGlzdHJvL2FzeW5jaHJvbm91c19zZWFyY2gvKicKICBpbmRleF9wZXJtaXNzaW9uczoKICAgIC0gaW5kZXhfcGF0dGVybnM6CiAgICAgICAgLSAnKicKICAgICAgYWxsb3dlZF9hY3Rpb25zOgogICAgICAgIC0gJ2luZGljZXM6ZGF0YS9yZWFkL3NlYXJjaConCiMgQWxsb3dzIHVzZXJzIHRvIHJlYWQgc3RvcmVkIGFzeW5jaHJvbm91cy1zZWFyY2ggcmVzdWx0cwphc3luY2hyb25vdXNfc2VhcmNoX3JlYWRfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gJ2NsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9hc3luY2hyb25vdXNfc2VhcmNoL2dldCcKIyBBbGxvd3MgdXNlciB0byB1c2UgYWxsIGluZGV4X21hbmFnZW1lbnQgYWN0aW9ucyAtIGlzbSBwb2xpY2llcywgcm9sbHVwcywgdHJhbnNmb3JtcwppbmRleF9tYW5hZ2VtZW50X2Z1bGxfYWNjZXNzOgogIHJlc2VydmVkOiB0cnVlCiAgY2x1c3Rlcl9wZXJtaXNzaW9uczoKICAgIC0gImNsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9pc20vKiIKICAgIC0gImNsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby9yb2xsdXAvKiIKICAgIC0gImNsdXN0ZXI6YWRtaW4vb3BlbmRpc3Ryby90cmFuc2Zvcm0vKiIKICBpbmRleF9wZXJtaXNzaW9uczoKICAgIC0gaW5kZXhfcGF0dGVybnM6CiAgICAgICAgLSAnKicKICAgICAgYWxsb3dlZF9hY3Rpb25zOgogICAgICAgIC0gJ2luZGljZXM6YWRtaW4vb3BlbnNlYXJjaC9pc20vKicKIyBBbGxvd3MgdXNlcnMgdG8gdXNlIGFsbCBjcm9zcyBjbHVzdGVyIHJlcGxpY2F0aW9uIGZ1bmN0aW9uYWxpdHkgYXQgbGVhZGVyIGNsdXN0ZXIKY3Jvc3NfY2x1c3Rlcl9yZXBsaWNhdGlvbl9sZWFkZXJfZnVsbF9hY2Nlc3M6CiAgcmVzZXJ2ZWQ6IHRydWUKICBpbmRleF9wZXJtaXNzaW9uczoKICAgIC0gaW5kZXhfcGF0dGVybnM6CiAgICAgICAgLSAnKicKICAgICAgYWxsb3dlZF9hY3Rpb25zOgogICAgICAgIC0gImluZGljZXM6YWRtaW4vcGx1Z2lucy9yZXBsaWNhdGlvbi9pbmRleC9zZXR1cC92YWxpZGF0ZSIKICAgICAgICAtICJpbmRpY2VzOmRhdGEvcmVhZC9wbHVnaW5zL3JlcGxpY2F0aW9uL2NoYW5nZXMiCiAgICAgICAgLSAiaW5kaWNlczpkYXRhL3JlYWQvcGx1Z2lucy9yZXBsaWNhdGlvbi9maWxlX2NodW5rIgojIEFsbG93cyB1c2VycyB0byB1c2UgYWxsIGNyb3NzIGNsdXN0ZXIgcmVwbGljYXRpb24gZnVuY3Rpb25hbGl0eSBhdCBmb2xsb3dlciBjbHVzdGVyCmNyb3NzX2NsdXN0ZXJfcmVwbGljYXRpb25fZm9sbG93ZXJfZnVsbF9hY2Nlc3M6CiAgcmVzZXJ2ZWQ6IHRydWUKICBjbHVzdGVyX3Blcm1pc3Npb25zOgogICAgLSAiY2x1c3RlcjphZG1pbi9wbHVnaW5zL3JlcGxpY2F0aW9uL2F1dG9mb2xsb3cvdXBkYXRlIgogIGluZGV4X3Blcm1pc3Npb25zOgogICAgLSBpbmRleF9wYXR0ZXJuczoKICAgICAgICAtICcqJwogICAgICBhbGxvd2VkX2FjdGlvbnM6CiAgICAgICAgLSAiaW5kaWNlczphZG1pbi9wbHVnaW5zL3JlcGxpY2F0aW9uL2luZGV4L3NldHVwL3ZhbGlkYXRlIgogICAgICAgIC0gImluZGljZXM6ZGF0YS93cml0ZS9wbHVnaW5zL3JlcGxpY2F0aW9uL2NoYW5nZXMiCiAgICAgICAgLSAiaW5kaWNlczphZG1pbi9wbHVnaW5zL3JlcGxpY2F0aW9uL2luZGV4L3N0YXJ0IgogICAgICAgIC0gImluZGljZXM6YWRtaW4vcGx1Z2lucy9yZXBsaWNhdGlvbi9pbmRleC9wYXVzZSIKICAgICAgICAtICJpbmRpY2VzOmFkbWluL3BsdWdpbnMvcmVwbGljYXRpb24vaW5kZXgvcmVzdW1lIgogICAgICAgIC0gImluZGljZXM6YWRtaW4vcGx1Z2lucy9yZXBsaWNhdGlvbi9pbmRleC9zdG9wIgogICAgICAgIC0gImluZGljZXM6YWRtaW4vcGx1Z2lucy9yZXBsaWNhdGlvbi9pbmRleC91cGRhdGUiCiAgICAgICAgLSAiaW5kaWNlczphZG1pbi9wbHVnaW5zL3JlcGxpY2F0aW9uL2luZGV4L3N0YXR1c19jaGVjayI=")
-	} else if config == "roles_mapping.yml" {
-		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogInJvbGVzbWFwcGluZyIKICBjb25maWdfdmVyc2lvbjogMgphbGxfYWNjZXNzOgogIHJlc2VydmVkOiBmYWxzZQogIGJhY2tlbmRfcm9sZXM6CiAgLSAiYWRtaW4iCiAgZGVzY3JpcHRpb246ICJNYXBzIGFkbWluIHRvIGFsbF9hY2Nlc3MiCm93bl9pbmRleDoKICByZXNlcnZlZDogZmFsc2UKICB1c2VyczoKICAtICIqIgogIGRlc2NyaXB0aW9uOiAiQWxsb3cgZnVsbCBhY2Nlc3MgdG8gYW4gaW5kZXggbmFtZWQgbGlrZSB0aGUgdXNlcm5hbWUiCnJlYWRhbGw6CiAgcmVzZXJ2ZWQ6IGZhbHNlCiAgYmFja2VuZF9yb2xlczoKICAtICJyZWFkYWxsIgptYW5hZ2Vfc25hcHNob3RzOgogIHJlc2VydmVkOiBmYWxzZQogIGJhY2tlbmRfcm9sZXM6CiAgLSAic25hcHNob3RyZXN0b3JlIgpkYXNoYm9hcmRfc2VydmVyOgogIHJlc2VydmVkOiB0cnVlCiAgdXNlcnM6CiAgLSAiZGFzaGJvYXJkdXNlciI=")
-	} else if config == "tenants.yml" {
-		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogInRlbmFudHMiCiAgY29uZmlnX3ZlcnNpb246IDI=")
-	} else if config == "whitelist.yml" {
-		value, _ = base64.StdEncoding.DecodeString("X21ldGE6CiAgdHlwZTogIndoaXRlbGlzdCIKICBjb25maWdfdmVyc2lvbjogMg==")
-	}
-	return value
+	return modifiedYaml, err
 }
 
 func UsernameAndPassword(k8sClient k8s.K8sClient, cr *opsterv1.OpenSearchCluster) (string, string, error) {

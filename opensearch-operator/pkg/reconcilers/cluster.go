@@ -139,62 +139,8 @@ func (r *ClusterReconciler) Reconcile() (ctrl.Result, error) {
 	// Update the CR status to reflect the current OpenSearch health and nodes
 	result.CombineErr(r.UpdateClusterStatus())
 
-	// if r.instance.Status.Health == "green" && !r.instance.Status.SecretPatched && r.instance.Spec.Security.RandomAdminSecrets {
-	// 	// if !r.instance.Status.SecretPatched && r.instance.Spec.Security.RandomAdminSecrets {
-	// 	r.logger.Info("Cluster with default credentials initialized. Generate random secrets.")
-	// 	changed, err := helpers.PatchRandomSecrets(r.client, r.instance)
-	// 	if changed {
-	// 		// r.instance.Status.SecretPatched = true
-	// 		err := r.client.UpdateOpenSearchClusterStatus(client.ObjectKeyFromObject(r.instance), func(instance *opsterv1.OpenSearchCluster) {
-	// 			instance.Status.SecretPatched = true
-	// 		})
-	// 		r.callUpdateSecurityConfigJob()
-	// 		result.CombineErr(err)
-	// 		r.logger.Info("Cluster  default credentials changed.")
-	// 	} else {
-	// 		r.logger.Error(err, "Cluster  default credentials not changed.")
-	// 	}
-	// }
-
 	return result.Result, result.Err
 }
-
-// func (r *ClusterReconciler) callUpdateSecurityConfigJob() (*ctrl.Result, error) {
-// 	clusterName := r.instance.Name
-// 	namespace := r.instance.Namespace
-// 	configSecretName := r.instance.Spec.Security.Config.SecurityconfigSecret.Name
-// 	jobName := clusterName + "-securityconfig-update"
-// 	job, err := r.client.GetJob(jobName, namespace)
-// 	if err == nil {
-// 		r.logger.Info("Deleting old update job")
-// 		err := r.client.DeleteJob(&job)
-// 		if err != nil {
-// 			return &ctrl.Result{}, err
-// 		}
-// 	}
-// 	configSecret, _ := r.client.GetSecret(configSecretName, namespace)
-// 	cmdArg := BuildCmdArg(r.instance, &configSecret, r.logger)
-// 	adminCertName := fmt.Sprintf("%s-admin-cert", r.instance.Name)
-// 	checksumval, _ := checksum(configSecret.Data)
-
-// 	job = builders.NewSecurityconfigUpdateJob(
-// 		r.instance,
-// 		jobName,
-// 		namespace,
-// 		checksumval,
-// 		adminCertName,
-// 		cmdArg,
-// 		r.reconcilerContext.Volumes,
-// 		r.reconcilerContext.VolumeMounts,
-// 	)
-// 	if err := ctrl.SetControllerReference(r.instance, &job, r.client.Scheme()); err != nil {
-// 		return &ctrl.Result{}, err
-// 	}
-
-// 	_, err = r.client.CreateJob(&job)
-// 	return &ctrl.Result{}, err
-
-// }
 
 func (r *ClusterReconciler) reconcileNodeStatefulSet(nodePool opsterv1.NodePool, username string) (*ctrl.Result, error) {
 	found, nodePoolConfig := r.reconcilerContext.fetchNodePoolHash(nodePool.Component)
