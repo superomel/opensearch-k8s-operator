@@ -332,16 +332,6 @@ func (r *OpenSearchClusterReconciler) reconcilePhaseRunning(ctx context.Context)
 		}
 	}
 
-	// if r.Instance.Status.Initialized && !r.Instance.Status.SecretPatched && r.Instance.Spec.Security.RandomAdminSecrets {
-	// 	r.Logger.Info("Cluster with default credentials initialized. Generate random secrets.")
-	// 	changed, err := helpers.PatchRandomSecrets(r.Client, r.Instance)
-	// 	if changed {
-	// 		r.Instance.Status.SecretPatched = true
-	// 		r.Logger.Info("Cluster  default credentials changed.")
-	// 	} else {
-	// 		r.Logger.Error(err, "Cluster  default credentials not changed.")
-	// 	}
-	// }
 	// -------- all resources has been created -----------
 	return ctrl.Result{Requeue: true, RequeueAfter: 30 * time.Second}, nil
 }
